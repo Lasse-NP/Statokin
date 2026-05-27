@@ -27,7 +27,7 @@ impl Watcher {
         let mut noti = Inotify::init()?;
         let mut map = HashMap::new();
         let file_count = count_files(&path)?;
-        if file_count > 50000 {
+        if file_count > 100000 {
             println!("Chosen path is highly populated with files: {} files", file_count);
             println!("Proceed anyway? (y/N)");
             let stdin = io::stdin();
