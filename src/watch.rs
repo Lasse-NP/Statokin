@@ -14,6 +14,7 @@ use inotify::{
 
 pub struct Watcher {
     file_count: u32,
+    file_map: HashMap<PathBuf, Vec<EventMask>>,
     inotify: Inotify,
     watch_map: HashMap<WatchDescriptor, PathBuf>,
     top_path: PathBuf,
@@ -24,9 +25,13 @@ impl Watcher {
         println!("Watcher Initializing...");
         let path = PathBuf::from(path);
         println!("Watcher Path Granted: {}", path.display());
+
         let mut noti = Inotify::init()?;
-        let mut map = HashMap::new();
-        let file_count = count_files(&path)?;
+        let mut watch_map = HashMap::new();
+        let mut file_map = HashMap::new();
+
+        let file_count = count_files(&path, &mut file_map)?;
+
         if file_count > 100000 {
             println!("Chosen path is highly populated with files: {} files", file_count);
             println!("Proceed anyway? (y/N)");
@@ -44,21 +49,32 @@ impl Watcher {
             println!("Total file count: {} files", file_count);
             println!("Proceeding...");
         }
-        mark_dirs(&path, &mut map, &mut noti)?;
-        println!("Watcher established at {} with {} entries.", path.display(), map.len());
-        Ok(Watcher { file_count, inotify: noti, watch_map: map, top_path: path })
+
+        mark_dirs(&path, &mut watch_map, &mut noti)?;
+
+        if watch_map.len() == 1 {
+            println!("Watcher established at {} with {} directory.", path.display(), watch_map.len());
+        } else {
+            println!("Watcher established at {} with {} directories.", path.display(), watch_map.len());
+        }
+        
+        for entry in file_map.keys() {
+            println!("File Entry: {}", entry.display())
+        }
+
+        Ok(Watcher { file_count, file_map, inotify: noti, watch_map: watch_map, top_path: path })
     }
 
     pub fn run(&mut self) {
         let mut buffer = [0u8; 4096];
         loop {
             let events = self.inotify.read_events_blocking(&mut buffer).expect("Failed to read events.");
-            let map_ref = &self.watch_map;
             for event in events {
-                if let Some(path) = map_ref.get(&event.wd) {
+                if let Some(path) = self.watch_map.get(&event.wd) {
                     let name = event.name.as_deref().unwrap_or_default();
                     let action = mask_to_string(&event.mask);
                     let full_path = path.join(&name);
+                    self.file_map.entry(full_path.clone()).or_insert_with(Vec::new).push(event.mask);
                     println!("File: {} | Operation: {}", full_path.display(), action)
                 }
             }
@@ -74,16 +90,16 @@ impl Watcher {
     }
 }
 
-fn count_files(dir: &Path) -> io::Result<u32> {
+fn count_files(dir: &Path, map: &mut HashMap<PathBuf, Vec<EventMask>>) -> io::Result<u32> {
     let mut count = 0;
     if dir.is_dir() {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
             count += 1;
+            map.insert(path.clone(), Vec::new());
             if path.is_dir() {
-                count += 1;
-                count += count_files(&path)?;
+                count += count_files(&path, map)?;
             }
         }
     }
