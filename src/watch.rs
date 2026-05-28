@@ -5,7 +5,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::collections::HashMap;
 use std::time::Instant;
-use inotify::Events;
 use inotify::{
     Inotify,
     WatchDescriptor,
@@ -15,11 +14,9 @@ use inotify::{
 
 
 pub struct Watcher {
-    file_count: u32,
     file_map: HashMap<PathBuf, Vec<EventMask>>,
     inotify: Inotify,
     watch_map: HashMap<WatchDescriptor, PathBuf>,
-    top_path: PathBuf,
 }
 
 impl Watcher {
@@ -32,7 +29,7 @@ impl Watcher {
         let mut watch_map = HashMap::new();
         let mut file_map = HashMap::new();
 
-        let file_count = count_files(&path, &mut file_map)?;
+        let file_count = map_files(&path, &mut file_map)?;
 
         if file_count > 100000 {
             println!("Chosen path is highly populated with files: {} files", file_count);
@@ -60,7 +57,7 @@ impl Watcher {
             println!("Watcher established at {} with {} directories. Currently watching: {} files.", path.display(), watch_map.len(), file_count);
         }
 
-        Ok(Watcher { file_count, file_map, inotify: noti, watch_map: watch_map, top_path: path })
+        Ok(Watcher { file_map, inotify: noti, watch_map: watch_map })
     }
 
     pub fn run(&mut self) {
@@ -108,17 +105,24 @@ impl Watcher {
             }
         }
     }
-
-    pub fn get_top_path(&self) -> &PathBuf {
-        &self.top_path
-    }
-
-    pub fn get_watch_map(&self) -> &HashMap<WatchDescriptor, PathBuf> {
-        &self.watch_map
-    }
 }
 
-fn count_files(dir: &Path, map: &mut HashMap<PathBuf, Vec<EventMask>>) -> io::Result<u32> {
+pub fn count_files(dir: &Path) -> io::Result<u32> {
+    let mut count = 0;
+    if dir.is_dir() {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            count += 1;
+            if path.is_dir() {
+                count += count_files(&path)?;
+            }
+        }
+    }
+    Ok(count)
+}
+
+fn map_files(dir: &Path, map: &mut HashMap<PathBuf, Vec<EventMask>>) -> io::Result<u32> {
     let mut count = 0;
     if dir.is_dir() {
         for entry in fs::read_dir(dir)? {
@@ -127,7 +131,7 @@ fn count_files(dir: &Path, map: &mut HashMap<PathBuf, Vec<EventMask>>) -> io::Re
             count += 1;
             map.insert(path.clone(), Vec::new());
             if path.is_dir() {
-                count += count_files(&path, map)?;
+                count += map_files(&path, map)?;
             }
         }
     }
