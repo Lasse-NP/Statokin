@@ -4,6 +4,8 @@ use std::io::BufRead;
 use std::path::Path;
 use std::path::PathBuf;
 use std::collections::HashMap;
+use std::time::Instant;
+use inotify::Events;
 use inotify::{
     Inotify,
     WatchDescriptor,
@@ -53,13 +55,9 @@ impl Watcher {
         mark_dirs(&path, &mut watch_map, &mut noti)?;
 
         if watch_map.len() == 1 {
-            println!("Watcher established at {} with {} directory.", path.display(), watch_map.len());
+            println!("Watcher established at {} with {} directory. Currently watching: {} files.", path.display(), watch_map.len(), file_count);
         } else {
-            println!("Watcher established at {} with {} directories.", path.display(), watch_map.len());
-        }
-        
-        for entry in file_map.keys() {
-            println!("File Entry: {}", entry.display())
+            println!("Watcher established at {} with {} directories. Currently watching: {} files.", path.display(), watch_map.len(), file_count);
         }
 
         Ok(Watcher { file_count, file_map, inotify: noti, watch_map: watch_map, top_path: path })
@@ -67,15 +65,45 @@ impl Watcher {
 
     pub fn run(&mut self) {
         let mut buffer = [0u8; 4096];
+        let mut pending_moves: HashMap<u32, (PathBuf, Instant)> = HashMap::new();
         loop {
-            let events = self.inotify.read_events_blocking(&mut buffer).expect("Failed to read events.");
+            std::thread::sleep(std::time::Duration::from_millis(500));
+
+            let expired: Vec<u32> = pending_moves.iter().filter(|(_, value)| value.1.elapsed().as_secs() > 3).map(|(cookie, _)| *cookie).collect();
+            for cookie in expired {
+                if let Some((old_path, _)) = pending_moves.remove(&cookie) {
+                    self.file_map.remove(&old_path);
+                    println!("File: {} -> Unknown | Operation: Exited to Outside Scope", old_path.display())
+                }
+            }
+
+            let events = match self.inotify.read_events(&mut buffer) {
+                Ok(events) => events,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(e) => panic!("Failed to read events: {}", e)
+            };
+
             for event in events {
                 if let Some(path) = self.watch_map.get(&event.wd) {
                     let name = event.name.as_deref().unwrap_or_default();
                     let action = mask_to_string(&event.mask);
                     let full_path = path.join(&name);
-                    self.file_map.entry(full_path.clone()).or_insert_with(Vec::new).push(event.mask);
-                    println!("File: {} | Operation: {}", full_path.display(), action)
+                    if event.mask.contains(EventMask::MOVED_FROM) {
+                        pending_moves.insert(event.cookie, (full_path.clone(), Instant::now()));
+                    } else if event.mask.contains(EventMask::MOVED_TO) {
+                        if let Some(value) = pending_moves.remove(&event.cookie) {
+                            let old_path = value.0;
+                            let vector_data = self.file_map.remove(&old_path).unwrap_or_default();
+                            self.file_map.insert(full_path.clone(), vector_data);
+                            println!("File: {} -> {} | Operation: Moved To New Location", old_path.display(), full_path.display())
+                        } else {
+                            self.file_map.entry(full_path.clone()).or_insert_with(Vec::new).push(event.mask);
+                            println!("File: Unknown -> {} | Operation: Entered From Outside Scope", full_path.display())
+                        }
+                    } else {
+                        self.file_map.entry(full_path.clone()).or_insert_with(Vec::new).push(event.mask);
+                        println!("File: {} | Operation: {}", full_path.display(), action)
+                    }
                 }
             }
         }
